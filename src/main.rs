@@ -10,9 +10,10 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::io;
 use std::io::{BufReader, BufRead};
 use std::fs::File;
+use string_interner::StringInterner;
 
 fn main() {
-    let directory = "corpora/oanc";
+    let directory = "corpora/wortschatz";
 
     let files: Vec<(usize, PathBuf)> = walkdir::WalkDir::new(directory).into_iter().map(Result::unwrap)
         .filter(|entry| entry.path().extension() == Some(OsStr::new("txt")))
@@ -65,11 +66,16 @@ fn main() {
     });
 
 
-    type Words<T> = HashMap<String, T>;
+
+    type StringId = usize;
+    type Words<T> = HashMap<StringId, T>;
     type WordCount = Words<usize>;
     type CharCount = HashMap<char, usize>;
-    type Chain = HashMap<Vec<String>, WordCount>;
+    type Chain = HashMap<Vec<StringId>, WordCount>;
     let max_chain_len = 2;
+
+
+    let mut strings: StringInterner<StringId> = string_interner::StringInterner::with_capacity(2048);
 
     let mut word_chains: Chain = Chain::with_capacity(1024*1024);
     let mut sentence_starter_words: WordCount = HashMap::with_capacity(1024*1024);
@@ -79,9 +85,11 @@ fn main() {
     let mut word_count: u128 = 0;
 
     for sentence in sentence_receiver {
+        let words: Vec<StringId> = sentence.iter().map(|string| strings.get_or_intern(string)).collect();
+
         word_count += sentence.len() as u128;
 
-        *sentence_starter_words.entry(sentence.first().unwrap().clone()).or_insert(0) += 1;
+        *sentence_starter_words.entry(*words.first().unwrap()).or_insert(0) += 1;
         *sentence_starter_chars.entry(sentence.first().unwrap().chars().next().unwrap()).or_insert(0) += 1;
 
         for word in &sentence {
@@ -89,12 +97,12 @@ fn main() {
         }
 
         for chain_len in 1 ..= max_chain_len {
-            for key in sentence.windows(chain_len + 1) {
+            for key in words.windows(chain_len + 1) {
                 let value = &key[chain_len];
                 let key = Vec::from(&key[ .. chain_len]);
 
-                let map = word_chains.entry(key.clone()).or_insert_with(HashMap::new);
-                *map.entry(value.clone()).or_insert(0) += 1;
+                let map = word_chains.entry(key).or_insert_with(HashMap::new);
+                *map.entry(*value).or_insert(0) += 1;
             }
         }
     }
@@ -114,12 +122,13 @@ fn main() {
     }
 
     let starter_words = map_to_sorted_vec(sentence_starter_words);
+    let starter_word_strings: Vec<&str> = starter_words.iter().map(|&id| strings.resolve(id).unwrap()).collect();
 
-    println!("why not start with one of these words: {}?", &starter_words[..42].join(", "));
+    println!("why not start with one of these words: {}?", &starter_word_strings[..24].join(", "));
     println!("type something!");
 
 
-    let chains: HashMap<Vec<String>, Vec<String>> = word_chains.into_par_iter()
+    let chains: HashMap<Vec<StringId>, Vec<StringId>> = word_chains.into_par_iter()
         .filter(|(_, values)| !values.is_empty())
         .map(|(words, successors)| (words, map_to_sorted_vec(successors)))
         .collect();
@@ -132,29 +141,30 @@ fn main() {
         };
 
         let words = split_to_words(&input);
+        let word_ids: Vec<StringId> = words.iter().map(|string| strings.get_or_intern(string)).collect();
 
-        for chain_len in (1 ..= max_chain_len.min(words.len())).rev() {
-            let mut key = Vec::from(&words[words.len() - chain_len .. ]);
+        for chain_len in (1 ..= max_chain_len.min(word_ids.len())).rev() {
+            let mut key: Vec<StringId> = Vec::from(&word_ids[word_ids.len() - chain_len .. ]);
 
             let options = chains.get(&key).map(|options|{
                 &options[ .. options.len().min(6) ]
             });
 
             if let Some(options) = options {
-                for option in options {
+                for &option in options {
                     key.push(option.clone());
 
-                    if let Some(option2) = chains.get(&key).and_then(|successors| successors.first()) {
-                        println!("\t... {} {} (2, exact)", option, option2);
+                    if let Some(&option2) = chains.get(&key).and_then(|successors| successors.first()) {
+                        println!("\t... {} {} (2, exact)", strings.resolve(option).unwrap(), strings.resolve(option2).unwrap());
                     }
                     else {
                         key.remove(0);
 
-                        if let Some(option2) = chains.get(&key).and_then(|successors| successors.first()) {
-                            println!("\t... {} {} (2, artificial)", option, option2);
+                        if let Some(&option2) = chains.get(&key).and_then(|successors| successors.first()) {
+                            println!("\t... {} {} (2, artificial)", strings.resolve(option).unwrap(), strings.resolve(option2).unwrap());
                         }
                         else {
-                            println!("\t... {} (1)", option);
+                            println!("\t... {} (1)", strings.resolve(option).unwrap());
                         }
                     }
                 }
