@@ -2,27 +2,55 @@
 // http://www.anc.org/data/oanc/download/
 // http://www.anc.org/data/masc/downloads/data-download/
 // https://wortschatz.uni-leipzig.de/en/download/
+// http://norvig.com/spell-correct.html -> http://norvig.com/big.txt
+
 
 use std::collections::{HashMap, BTreeMap};
 use std::ffi::OsStr;
-use std::path::{PathBuf};
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use std::io;
+use std::{io, mem};
 use std::io::{BufReader, BufRead};
 use std::fs::File;
 use string_interner::StringInterner;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
+
+mod correction;
 
 fn main() {
     let directory = "corpora";
-    let files: Vec<PathBuf> = walkdir::WalkDir::new(directory).into_iter().map(Result::unwrap)
+    println!("beginning text analysis of directory `{}`", directory);
+
+
+    let files = walkdir::WalkDir::new(directory).into_iter().map(Result::unwrap)
         .filter(|entry| entry.path().extension() == Some(OsStr::new("txt")))
-        .map(walkdir::DirEntry::into_path)
-        .collect();
+        .map(walkdir::DirEntry::into_path);
 
-    let count = files.len();
-    println!("starting to analyze {} files", count);
+    let sentences = files.into_iter().flat_map(|path| {
+        let mut chars = BufReader::new(File::open(path).unwrap())
+            .lines().flat_map(|string| string.unwrap().chars().collect::<Vec<char>>().into_iter());
 
-    let (sender, sentence_receiver) = std::sync::mpsc::channel();
+        std::iter::from_fn(move || {
+            let mut sentence = String::with_capacity(256);
+
+            while let Some(character) = chars.next() {
+                if "!?.".contains(character) {
+                    return Some(split_to_words(
+                        &sentence.replace("-\n", "") // merge words that have been split by a linebreak
+                    ));
+                }
+                else {
+                    sentence.push(character);
+                }
+            }
+
+            return None;
+        })
+    });
+
+    let sentences = sentences.filter_map(|sentence|{
+        let sentence = sentence.into_iter().filter(|word| !word.is_empty()).collect::<Vec<String>>();
+        if !sentence.is_empty() { Some(sentence) }
+        else { None }
+    });
 
     fn split_to_words(sentence: &str) -> Vec<String> {
         sentence.split(char::is_whitespace)
@@ -37,53 +65,23 @@ fn main() {
     }
 
 
-    files.into_par_iter().for_each_with(sender, |sentence_sender, path| {
-        let mut chars = BufReader::new(File::open(path).unwrap())
-            .lines().flat_map(|string| string.unwrap().chars().collect::<Vec<char>>().into_iter());
-
-        let mut sentence = String::with_capacity(1024);
-
-        while let Some(character) = chars.next() {
-            if "!?.".contains(character) {
-                sentence = sentence.replace("-\n", ""); // merge words that have been split by a linebreak
-                sentence = sentence.trim().to_string();
-
-                if !sentence.is_empty() {
-                    let words = split_to_words(&sentence);
-
-                    if !words.is_empty() {
-                        sentence_sender.send(words).unwrap();
-                    }
-
-                    sentence.clear();
-                }
-            }
-            else {
-                sentence.push(character);
-            }
-        }
-    });
-
-
 
     type StringId = usize;
-    type Words<T> = HashMap<StringId, T>;
-    type WordCount = Words<usize>;
-    type CharCount = HashMap<char, usize>;
-    type Chain = HashMap<Vec<StringId>, WordCount>;
-    let max_chain_len = 1;
-
+    type Count<T> = HashMap<T, usize>;
+    type Chain<T> = HashMap<Vec<T>, Count<T>>;
+    let max_chain_len = 2;
 
     let mut strings: StringInterner<StringId> = string_interner::StringInterner::with_capacity(2048);
 
-    let mut word_chains: Chain = Chain::with_capacity(1024*1024);
-    let mut sentence_starter_words: WordCount = HashMap::with_capacity(1024*1024);
-    let mut sentence_starter_chars: CharCount = HashMap::new();
-    let mut word_starter_chars: CharCount = HashMap::new();
-
+    // initialize the statistical data which we are going to analyze
+    let mut word_chains: Chain<StringId> = Chain::with_capacity(1024*1024);
+    let mut sentence_starter_words: Count<StringId> = HashMap::with_capacity(1024*1024);
+    let mut sentence_starter_chars: Count<char> = HashMap::new();
+    let mut word_starter_chars: Count<char> = HashMap::new();
     let mut word_count: u128 = 0;
 
-    for sentence in sentence_receiver {
+    // synchroneously collect all the parsed data into our statistical hashmap
+    for sentence in sentences {
         let words: Vec<StringId> = sentence.iter().map(|string| strings.get_or_intern(string)).collect();
 
         word_count += sentence.len() as u128;
@@ -108,12 +106,13 @@ fn main() {
 
     println!("analyzed all files");
     println!("processed {} words", word_count);
+    println!("collected {} prediction entries", word_chains.len());
     println!();
 
 
     println!("you type, i predict.");
 
-    fn map_to_sorted_vec<T>(map: HashMap<T, usize>) -> Vec<T> {
+    fn map_to_sorted_vec<T>(map: Count<T>) -> Vec<T> {
         let tree: BTreeMap<usize, T> = map.into_iter()
             .map(|(value, count)| (count, value)).collect();
 
@@ -127,10 +126,11 @@ fn main() {
     println!("type something!");
 
 
-    let chains: HashMap<Vec<StringId>, Vec<StringId>> = word_chains.into_par_iter()
-        .filter(|(_, values)| !values.is_empty())
+    let chains: HashMap<Vec<StringId>, Vec<StringId>> = word_chains
+        .into_par_iter().filter(|(_, values)| !values.is_empty())
         .map(|(words, successors)| (words, map_to_sorted_vec(successors)))
         .collect();
+
 
     loop {
         let input = {
