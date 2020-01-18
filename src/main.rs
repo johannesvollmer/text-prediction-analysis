@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, BTreeMap};
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{PathBuf};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::io;
 use std::io::{BufReader, BufRead};
@@ -13,11 +13,10 @@ use std::fs::File;
 use string_interner::StringInterner;
 
 fn main() {
-    let directory = "corpora/wortschatz";
-
-    let files: Vec<(usize, PathBuf)> = walkdir::WalkDir::new(directory).into_iter().map(Result::unwrap)
+    let directory = "corpora";
+    let files: Vec<PathBuf> = walkdir::WalkDir::new(directory).into_iter().map(Result::unwrap)
         .filter(|entry| entry.path().extension() == Some(OsStr::new("txt")))
-        .map(walkdir::DirEntry::into_path).enumerate()
+        .map(walkdir::DirEntry::into_path)
         .collect();
 
     let count = files.len();
@@ -38,7 +37,7 @@ fn main() {
     }
 
 
-    files.into_par_iter().for_each_with(sender, |sentence_sender, (_index, path)| {
+    files.into_par_iter().for_each_with(sender, |sentence_sender, path| {
         let mut chars = BufReader::new(File::open(path).unwrap())
             .lines().flat_map(|string| string.unwrap().chars().collect::<Vec<char>>().into_iter());
 
@@ -72,7 +71,7 @@ fn main() {
     type WordCount = Words<usize>;
     type CharCount = HashMap<char, usize>;
     type Chain = HashMap<Vec<StringId>, WordCount>;
-    let max_chain_len = 2;
+    let max_chain_len = 1;
 
 
     let mut strings: StringInterner<StringId> = string_interner::StringInterner::with_capacity(2048);
@@ -147,7 +146,7 @@ fn main() {
             let mut key: Vec<StringId> = Vec::from(&word_ids[word_ids.len() - chain_len .. ]);
 
             let options = chains.get(&key).map(|options|{
-                &options[ .. options.len().min(6) ]
+                &options[ .. options.len().min(20) ]
             });
 
             if let Some(options) = options {
@@ -155,17 +154,16 @@ fn main() {
                     key.push(option.clone());
 
                     if let Some(&option2) = chains.get(&key).and_then(|successors| successors.first()) {
-                        println!("\t... {} {} (2, exact)", strings.resolve(option).unwrap(), strings.resolve(option2).unwrap());
+                        println!("\t... {} {}", strings.resolve(option).unwrap(), strings.resolve(option2).unwrap());
                     }
                     else {
-                        key.remove(0);
-
-                        if let Some(&option2) = chains.get(&key).and_then(|successors| successors.first()) {
-                            println!("\t... {} {} (2, artificial)", strings.resolve(option).unwrap(), strings.resolve(option2).unwrap());
-                        }
-                        else {
-                            println!("\t... {} (1)", strings.resolve(option).unwrap());
-                        }
+//                        key.remove(0);
+//                        if let Some(&option2) = chains.get(&key).and_then(|successors| successors.first()) {
+//                            println!("\t... {} {} (2, artificial)", strings.resolve(option).unwrap(), strings.resolve(option2).unwrap());
+//                        }
+//                        else {
+                            println!("\t... {}", strings.resolve(option).unwrap());
+//                        }
                     }
                 }
             }
