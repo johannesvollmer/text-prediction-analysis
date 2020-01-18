@@ -12,7 +12,7 @@ use std::io::{BufReader, BufRead};
 use std::fs::File;
 
 fn main() {
-    let directory = "corpora/wortschatz";
+    let directory = "corpora/oanc";
 
     let files: Vec<(usize, PathBuf)> = walkdir::WalkDir::new(directory).into_iter().map(Result::unwrap)
         .filter(|entry| entry.path().extension() == Some(OsStr::new("txt")))
@@ -68,13 +68,14 @@ fn main() {
     type Words<T> = HashMap<String, T>;
     type WordCount = Words<usize>;
     type CharCount = HashMap<char, usize>;
-
-    type Chain = Words<(usize, Words<(usize, Words<usize>)>)>;
+    type Chain = HashMap<Vec<String>, WordCount>;
+    let max_chain_len = 2;
 
     let mut word_chains: Chain = Chain::with_capacity(1024*1024);
     let mut sentence_starter_words: WordCount = HashMap::with_capacity(1024*1024);
     let mut sentence_starter_chars: CharCount = HashMap::new();
     let mut word_starter_chars: CharCount = HashMap::new();
+
     let mut word_count: u128 = 0;
 
     for sentence in sentence_receiver {
@@ -87,22 +88,14 @@ fn main() {
             *word_starter_chars.entry(word.chars().next().unwrap()).or_insert(0) += 1;
         }
 
-        for ((word1, word2), word3) in sentence.iter().zip(sentence.iter().skip(1)).zip(sentence.iter().skip(2)) {
-            let successors = word_chains.entry(word1.clone())
-                .or_insert_with(|| (0, HashMap::new()));
+        for chain_len in 1 ..= max_chain_len {
+            for key in sentence.windows(chain_len + 1) {
+                let value = &key[chain_len];
+                let key = Vec::from(&key[ .. chain_len]);
 
-            successors.0 += 1;
-
-            let successors2 = successors.1.entry(word2.clone())
-                .or_insert_with(|| (0, HashMap::new()));
-
-
-            successors2.0 += 1;
-
-            let count = successors2.1.entry(word3.clone())
-                .or_insert(0);
-
-            *count += 1;
+                let map = word_chains.entry(key.clone()).or_insert_with(HashMap::new);
+                *map.entry(value.clone()).or_insert(0) += 1;
+            }
         }
     }
 
@@ -111,46 +104,25 @@ fn main() {
     println!();
 
 
-    println!("returning early");
-    return;
-
-
     println!("you type, i predict.");
 
-    fn map_to_sorted_vec<T>(map: impl IntoIterator<Item=(T, usize)>) -> Vec<T> {
+    fn map_to_sorted_vec<T>(map: HashMap<T, usize>) -> Vec<T> {
         let tree: BTreeMap<usize, T> = map.into_iter()
-            .filter(|(_, count)| *count > 1)
             .map(|(value, count)| (count, value)).collect();
 
         tree.into_iter().map(|(_, value)| value).rev().collect()
     }
 
-    let starter_words = map_to_sorted_vec(sentence_starter_words.into_iter());
+    let starter_words = map_to_sorted_vec(sentence_starter_words);
 
     println!("why not start with one of these words: {}?", &starter_words[..42].join(", "));
     println!("type something!");
 
 
-    let chains: HashMap<String, Vec<String>> = word_chains.iter()
-        .map(|(word, (_count, successors))|{
-            let successors = successors.iter()
-                .map(|(word, (count, _successors))| (word.to_string(), *count));
-
-            (word.to_string(), map_to_sorted_vec(successors))
-        })
+    let chains: HashMap<Vec<String>, Vec<String>> = word_chains.into_par_iter()
         .filter(|(_, values)| !values.is_empty())
+        .map(|(words, successors)| (words, map_to_sorted_vec(successors)))
         .collect();
-
-    let chains2: HashMap<(String, String), Vec<String>> = word_chains.iter()
-        .flat_map(|(word1, (_count, successors1))|{
-            successors1.iter()
-                .map(move |(word2, (_count, successors2))|{
-                    ((word1.to_string(), word2.to_string()), map_to_sorted_vec(successors2.clone()))
-                })
-        })
-        .filter(|(_, values)| !values.is_empty())
-        .collect();
-
 
     loop {
         let input = {
@@ -160,55 +132,38 @@ fn main() {
         };
 
         let words = split_to_words(&input);
-        let two_words: Vec<String> = words.into_iter().rev().take(2).rev().collect();
 
-        match two_words.as_slice() {
-            [word] => {
-                let options = chains.get(word).map(|successors|{
-                    &successors[ .. successors.len().min(6) ]
-                });
+        for chain_len in (1 ..= max_chain_len.min(words.len())).rev() {
+            let mut key = Vec::from(&words[words.len() - chain_len .. ]);
 
-                if let Some(options) = options {
-                    for option in options {
-                        if let Some(option2) = chains2.get(&(word.to_string(), option.to_string())).and_then(|successors| successors.first()) {
-                            println!("\t... {} {}", option, option2);
+            let options = chains.get(&key).map(|options|{
+                &options[ .. options.len().min(6) ]
+            });
+
+            if let Some(options) = options {
+                for option in options {
+                    key.push(option.clone());
+
+                    if let Some(option2) = chains.get(&key).and_then(|successors| successors.first()) {
+                        println!("\t... {} {} (2, exact)", option, option2);
+                    }
+                    else {
+                        key.remove(0);
+
+                        if let Some(option2) = chains.get(&key).and_then(|successors| successors.first()) {
+                            println!("\t... {} {} (2, artificial)", option, option2);
                         }
                         else {
-                            println!("\t... {}", option);
+                            println!("\t... {} (1)", option);
                         }
                     }
                 }
-                else {
-                    println!("sorry, i have no idea what you want to type")
-                }
+            }
+            else {
+                println!("sorry, i have no idea what you want to type");
+            }
 
-                println!()
-            },
-
-            [word1, word2] => {
-                let options = chains2.get(&(word1.to_string(), word2.to_string())).map(|successors|{
-                    &successors[ .. successors.len().min(6) ]
-                });
-
-                if let Some(options) = options {
-                    for option1 in options {
-                        if let Some(option2) = chains2.get(&(word2.to_string(), option1.to_string())).and_then(|successors| successors.first()) {
-                            println!("\t... {} {}", option1, option2);
-                        }
-                        else {
-                            println!("\t... {}", option1);
-                        }
-                    }
-                }
-                else {
-                    println!("sorry, i have no idea what you want to type")
-                }
-
-                println!()
-            },
-
-            [] => continue,
-            _ => unreachable!(),
+            break;
         };
 
     }
