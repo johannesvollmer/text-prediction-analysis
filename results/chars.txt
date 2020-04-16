@@ -1,5 +1,5 @@
-// processed 123113235 words
-// collected 1570894 distinct words
+// processed 123.113.235 words
+// collected 1.570.894 distinct words
 
 [
     (
