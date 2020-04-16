@@ -5,23 +5,27 @@
 // http://norvig.com/spell-correct.html -> http://norvig.com/big.txt
 
 
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{HashMap, BTreeMap, HashSet};
 use std::ffi::OsStr;
-use std::{io, mem};
+use std::io;
 use std::io::{BufReader, BufRead};
 use std::fs::File;
 use string_interner::StringInterner;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+// use crate::correction::char_vec;
 
 mod correction;
 
 fn main() {
+    // let directory = "corpora/norvig-com-big.txt";
     let directory = "corpora";
+
     println!("beginning text analysis of directory `{}`", directory);
 
 
-    let files = walkdir::WalkDir::new(directory).into_iter().map(Result::unwrap)
-        .filter(|entry| entry.path().extension() == Some(OsStr::new("txt")))
+    let files = walkdir::WalkDir::new(directory)
+        .into_iter().filter_entry(|entry| !entry.path().file_name().unwrap().to_str().unwrap().starts_with("_"))
+        .map(Result::unwrap).filter(|entry| entry.path().extension() == Some(OsStr::new("txt"))) // ignore xml files
         .map(walkdir::DirEntry::into_path);
 
     let sentences = files.into_iter().flat_map(|path| {
@@ -53,7 +57,7 @@ fn main() {
     });
 
     fn split_to_words(sentence: &str) -> Vec<String> {
-        sentence.split(char::is_whitespace)
+        sentence.split_whitespace()
             .map(|word|
                 word.chars()
                     .flat_map(|c| c.to_lowercase())
@@ -66,10 +70,11 @@ fn main() {
 
 
 
-    type StringId = usize;
+    type StringId = string_interner::Sym;
+
     type Count<T> = HashMap<T, usize>;
     type Chain<T> = HashMap<Vec<T>, Count<T>>;
-    let max_chain_len = 2;
+    let max_chain_len = 1;
 
     let mut strings: StringInterner<StringId> = string_interner::StringInterner::with_capacity(2048);
 
@@ -78,6 +83,7 @@ fn main() {
     let mut sentence_starter_words: Count<StringId> = HashMap::with_capacity(1024*1024);
     let mut sentence_starter_chars: Count<char> = HashMap::new();
     let mut word_starter_chars: Count<char> = HashMap::new();
+    let mut all_chars: Count<char> = HashMap::new();
     let mut word_count: u128 = 0;
 
     // synchroneously collect all the parsed data into our statistical hashmap
@@ -91,6 +97,10 @@ fn main() {
 
         for word in &sentence {
             *word_starter_chars.entry(word.chars().next().unwrap()).or_insert(0) += 1;
+
+            for letter in word.chars() {
+                *all_chars.entry(letter).or_insert(0) += 1;
+            }
         }
 
         for chain_len in 1 ..= max_chain_len {
@@ -106,11 +116,16 @@ fn main() {
 
     println!("analyzed all files");
     println!("processed {} words", word_count);
+    println!("collected {} distinct words", strings.len());
     println!("collected {} prediction entries", word_chains.len());
-    println!();
 
 
-    println!("you type, i predict.");
+    fn map_to_sorted_count_vec<T>(map: Count<T>) -> Vec<(usize, T)> {
+        let tree: BTreeMap<usize, T> = map.into_iter()
+            .map(|(value, count)| (count, value)).collect();
+
+        tree.into_iter().rev().collect()
+    }
 
     fn map_to_sorted_vec<T>(map: Count<T>) -> Vec<T> {
         let tree: BTreeMap<usize, T> = map.into_iter()
@@ -122,14 +137,63 @@ fn main() {
     let starter_words = map_to_sorted_vec(sentence_starter_words);
     let starter_word_strings: Vec<&str> = starter_words.iter().map(|&id| strings.resolve(id).unwrap()).collect();
 
-    println!("why not start with one of these words: {}?", &starter_word_strings[..24].join(", "));
+    let chains: HashMap<Vec<StringId>, Vec<StringId>> = word_chains
+        .into_par_iter().filter(|(key, values)| !values.is_empty() && (key.len() == 1 || values.len() > 1))
+        .map(|(words, successors)| (words, map_to_sorted_vec(successors)))
+        .collect();
+
+    println!("condensed to {} prediction entries", chains.len());
+    println!();
+
+    println!("generic statistics: ");
+    println!("\tall chars: {:#?}", map_to_sorted_count_vec(all_chars));
+    println!("\tword starter chars: {:#?}", map_to_sorted_count_vec(word_starter_chars));
+    println!("\tsentence starter chars: {:#?}", map_to_sorted_count_vec(sentence_starter_chars));
+
+    println!();
+    println!("you type, i predict.");
+    println!("why not start with one of these words: {}?", &starter_word_strings[..24.min(starter_words.len())].join(", "));
     println!("type something!");
 
 
-    let chains: HashMap<Vec<StringId>, Vec<StringId>> = word_chains
-        .into_par_iter().filter(|(_, values)| !values.is_empty())
-        .map(|(words, successors)| (words, map_to_sorted_vec(successors)))
-        .collect();
+    let predict = |word_ids: &[StringId]| -> Vec<Vec<StringId>> {
+        for chain_len in (1 ..= max_chain_len.min(word_ids.len())).rev() {
+            let key: Vec<StringId> = Vec::from(&word_ids[word_ids.len() - chain_len .. ]);
+            // println!("prediction key: {:?}", key);
+
+            let options = chains.get(&key).map(|options|{
+                &options[ .. options.len().min(20) ]
+            });
+
+            // println!("first prediction: {:?}", options);
+
+            if let Some(options) = options {
+                return options.iter().map(|&option| {
+                    let mut key = key.clone();
+                    key.push(option);
+
+                    if let Some(&option2) = chains.get(&key).and_then(|successors| successors.first()) {
+                        // println!("{} {}", strings.resolve(option).unwrap(), strings.resolve(option2).unwrap());
+                        vec![ option, option2 ]
+                    }
+                    else {
+                        key.remove(0);
+                        if let Some(&option2) = chains.get(&key).and_then(|successors| successors.first()) {
+                            // println!("{} ({}?)", strings.resolve(option).unwrap(), strings.resolve(option2).unwrap());
+                            vec![ option, option2 ]
+                        }
+                        else {
+                            // println!("{}", strings.resolve(option).unwrap());
+                            vec![ option ]
+                        }
+                    }
+                }).collect()
+            }
+        };
+
+        Vec::new()
+    };
+
 
 
     loop {
@@ -140,39 +204,39 @@ fn main() {
         };
 
         let words = split_to_words(&input);
-        let word_ids: Vec<StringId> = words.iter().map(|string| strings.get_or_intern(string)).collect();
+        println!("words: {:?}", words);
 
-        for chain_len in (1 ..= max_chain_len.min(word_ids.len())).rev() {
-            let mut key: Vec<StringId> = Vec::from(&word_ids[word_ids.len() - chain_len .. ]);
+        let mut word_ids: Vec<StringId> = words.iter().map(|string| strings.get_or_intern(string)).collect();
 
-            let options = chains.get(&key).map(|options|{
-                &options[ .. options.len().min(20) ]
-            });
+        // for word_index in 0..word_ids.len() {
+            // let as_vec = char_vec(strings.resolve(word_ids[word_index]).unwrap());
+            // let corrections = correction::tier1_variations(&as_vec);
+            // let words_before_that = &word_ids[..word_index];
 
-            if let Some(options) = options {
-                for &option in options {
-                    key.push(option.clone());
+            // let predictions: HashSet<StringId> = predict(words_before_that).into_iter()
+            //     .map(|mut vec| vec.remove(0)).collect();
 
-                    if let Some(&option2) = chains.get(&key).and_then(|successors| successors.first()) {
-                        println!("\t... {} {}", strings.resolve(option).unwrap(), strings.resolve(option2).unwrap());
-                    }
-                    else {
-//                        key.remove(0);
-//                        if let Some(&option2) = chains.get(&key).and_then(|successors| successors.first()) {
-//                            println!("\t... {} {} (2, artificial)", strings.resolve(option).unwrap(), strings.resolve(option2).unwrap());
-//                        }
-//                        else {
-                            println!("\t... {}", strings.resolve(option).unwrap());
-//                        }
-                    }
-                }
-            }
-            else {
-                println!("sorry, i have no idea what you want to type");
-            }
+            // only correct where the corrected word would also be predicted
+            // let correction = corrections.filter_map(|string| strings.get(string))
+            //     .filter(|correction| predictions.contains(&correction))
+            //     .next();
+            //
+            // if let Some(correction) = correction {
+            //     word_ids[word_index] = correction;
+            // }
+        // }
 
-            break;
-        };
+        let user_words: Vec<&str> = word_ids.iter().map(|&id| strings.resolve(id).unwrap()).collect();
+        println!("corrected words: {:?}", user_words);
 
+        let predictions = predict(word_ids.as_slice());
+        // println!("actual predictions: {:?}", predictions);
+
+        for predicted_words in predictions {
+            let predicted_words: Vec<&str> = predicted_words.into_iter()
+                .map(|id| strings.resolve(id).unwrap()).collect();
+
+            println!("\t{} {}", user_words.join(" "), predicted_words.join(" ")); // TODO base selection on prediction of last word!
+        }
     }
 }
