@@ -1,6 +1,5 @@
 
 use std::ffi::OsStr;
-use std::{io, fs};
 use std::io::{BufReader, BufRead};
 use std::fs::File;
 
