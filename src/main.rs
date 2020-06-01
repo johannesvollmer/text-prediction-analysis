@@ -7,43 +7,22 @@
 
 mod corpus;
 mod completion;
+mod server;
 
 use crate::corpus::split_to_words;
+use crate::server::Response;
 
 fn main() {
-    use serde::{Deserialize, Serialize};
-    use std::sync::{Mutex};
+    // analyze the text corpora
+    let complete = completion::build(corpus::words());
 
-    let trie = completion::build(corpus::words());
-    let trie = Mutex::new(trie);
+    // serve the computed completitions
+    server::run(move |request| {
+        let previous_words = split_to_words(&request.previous);
 
-    println!("listening on localhost:3000");
-    rouille::start_server_with_pool("localhost:3000", Some(1), move |request| {
+        let completions: Vec<String> = complete(&previous_words.last().unwrap())
+            .into_iter().map(|(word, _)| word).collect();
 
-        #[derive(Serialize, Deserialize)]
-        struct Request {
-            previous: String,
-            next: String
-        }
-
-        #[derive(Serialize, Deserialize)]
-        struct Response {
-            completions: Vec<String>,
-        }
-
-        let request: Request = serde_json::from_reader(request.data().unwrap()).unwrap();
-
-        let candidates: Vec<String> = {
-            let pre_words = split_to_words(&request.previous);
-
-            let mut completions: Vec<(String, usize)> = trie.lock().unwrap()
-                .iter_prefix(pre_words.last().unwrap().as_bytes())
-                .map(|(word, &count)| (String::from_utf8(word).unwrap(), count)).collect();
-
-            completions.sort_by_key(|(_, count)| *count);
-            completions.into_iter().map(|(word, _)| word).collect()
-        };
-
-        rouille::Response::json(&Response { completions: candidates })
+        Response { completions }
     });
 }
