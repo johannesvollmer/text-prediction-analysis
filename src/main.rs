@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::ffi::OsStr;
-use std::io;
+use std::{io, fs};
 use std::io::{BufReader, BufRead};
 use std::fs::File;
 use string_interner::StringInterner;
@@ -37,9 +37,9 @@ fn main() {
 
             while let Some(character) = chars.next() {
                 if "!?.".contains(character) {
-                    return Some(split_to_words(
-                        &sentence.replace("-\n", "") // merge words that have been split by a linebreak
-                    ));
+                    let sentence = sentence.replace("-\n", ""); // merge words that have been split by a linebreak
+                    let words = split_to_words(&sentence);
+                    return Some((sentence, words));
                 }
                 else {
                     sentence.push(character);
@@ -50,9 +50,9 @@ fn main() {
         })
     });
 
-    let sentences = sentences.filter_map(|sentence|{
+    let sentences = sentences.filter_map(|(string, sentence)|{
         let sentence = sentence.into_iter().filter(|word| !word.is_empty()).collect::<Vec<String>>();
-        if !sentence.is_empty() { Some(sentence) }
+        if !sentence.is_empty() { Some((string, sentence)) }
         else { None }
     });
 
@@ -84,26 +84,37 @@ fn main() {
     let mut sentence_starter_chars: Count<char> = HashMap::new();
     let mut word_starter_chars: Count<char> = HashMap::new();
     let mut all_chars: Count<char> = HashMap::new();
+    let mut all_words : Count<StringId> = HashMap::new();
     let mut word_count: u128 = 0;
+    let mut char_count: u128 = 0;
 
     // synchroneously collect all the parsed data into our statistical hashmap
-    for sentence in sentences {
+    for (string, sentence) in sentences {
         let words: Vec<StringId> = sentence.iter().map(|string| strings.get_or_intern(string)).collect();
+
+        for &word in &words {
+            *all_words.entry(word).or_insert(0) += 1;
+        }
 
         word_count += sentence.len() as u128;
 
         *sentence_starter_words.entry(*words.first().unwrap()).or_insert(0) += 1;
         *sentence_starter_chars.entry(sentence.first().unwrap().chars().next().unwrap()).or_insert(0) += 1;
 
+        for char in string.chars() {
+            *all_chars.entry(char).or_insert(0) += 1;
+            char_count += 1;
+        }
+
         for word in &sentence {
             *word_starter_chars.entry(word.chars().next().unwrap()).or_insert(0) += 1;
 
-            for letter in word.chars() {
-                *all_chars.entry(letter).or_insert(0) += 1;
-            }
+            // for letter in word.chars() {
+            //     *word_chars.entry(letter).or_insert(0) += 1;
+            // }
         }
 
-        for chain_len in 1 ..= max_chain_len {
+        /*for chain_len in 1 ..= max_chain_len {
             for key in words.windows(chain_len + 1) {
                 let value = &key[chain_len];
                 let key = Vec::from(&key[ .. chain_len]);
@@ -111,19 +122,20 @@ fn main() {
                 let map = word_chains.entry(key).or_insert_with(HashMap::new);
                 *map.entry(*value).or_insert(0) += 1;
             }
-        }
+        }*/
+
+        println!("processed {} words", word_count);
     }
 
     println!("analyzed all files");
     println!("processed {} words", word_count);
+    println!("processed {} chars", char_count);
     println!("collected {} distinct words", strings.len());
     println!("collected {} prediction entries", word_chains.len());
 
 
-    fn map_to_sorted_count_vec<T>(map: Count<T>) -> Vec<(usize, T)> {
-        let tree: BTreeMap<usize, T> = map.into_iter()
-            .map(|(value, count)| (count, value)).collect();
-
+    fn map_to_sorted_count_vec<T>(map: impl Iterator<Item = (T, usize)>) -> Vec<(usize, T)> {
+        let tree: BTreeMap<usize, T> = map.map(|(value, count)| (count, value)).collect();
         tree.into_iter().rev().collect()
     }
 
@@ -133,6 +145,23 @@ fn main() {
 
         tree.into_iter().map(|(_, value)| value).rev().collect()
     }
+
+    let words = map_to_sorted_count_vec(
+        all_words.into_iter()
+            .map(|(key, count)| (strings.resolve(key).unwrap().to_string(), count))
+    );
+
+    let chars = map_to_sorted_count_vec(
+        all_chars.iter().map(|(&char, &count)| (char.to_string(), count))
+    );
+
+    fs::write("results/words.txt", format!("{:#?}", words)).unwrap();
+    fs::write("results/chars.txt", format!("{:#?}", chars)).unwrap();
+
+    fs::write("results/corpus.txt", format!(
+        "words: {}, chars:{}, distinct words: {}",
+        word_count, char_count, strings.len(),
+    )).unwrap();
 
     let starter_words = map_to_sorted_vec(sentence_starter_words);
     let starter_word_strings: Vec<&str> = starter_words.iter().map(|&id| strings.resolve(id).unwrap()).collect();
@@ -146,9 +175,9 @@ fn main() {
     println!();
 
     println!("generic statistics: ");
-    println!("\tall chars: {:#?}", map_to_sorted_count_vec(all_chars));
-    println!("\tword starter chars: {:#?}", map_to_sorted_count_vec(word_starter_chars));
-    println!("\tsentence starter chars: {:#?}", map_to_sorted_count_vec(sentence_starter_chars));
+    println!("\tall chars: {:#?}", map_to_sorted_count_vec(all_chars.into_iter()));
+    println!("\tword starter chars: {:#?}", map_to_sorted_count_vec(word_starter_chars.into_iter()));
+    println!("\tsentence starter chars: {:#?}", map_to_sorted_count_vec(sentence_starter_chars.into_iter()));
 
     println!();
     println!("you type, i predict.");
@@ -240,3 +269,4 @@ fn main() {
         }
     }
 }
+
