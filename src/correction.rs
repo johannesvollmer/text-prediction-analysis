@@ -13,19 +13,13 @@
 //     };
 // }
 
-/*pub fn char_vec(string: &str) -> Vec<char> {
+pub fn char_vec(string: &str) -> Vec<char> {
     string.chars().collect()
 }
 
-pub fn tier2_variations<'s>(string: &'s [char]) -> impl Iterator<Item = String> + 's {
-    todo!();
+pub fn tier2_only_variations<'s>(string: &'s [char]) -> impl Iterator<Item = String> + 's {
     tier1_variations(string)
-
-    // let tier_1 = tier1_variations(string);
-    // let tier_2 = tier1_variations(string)
-    //     .flat_map(|variation| tier1_variations(&char_vec(&variation)));
-    //
-    // tier_1.chain(tier_2)
+        .flat_map(|variation| tier1_variations(&char_vec(&variation)))
 }
 
 pub fn tier1_variations(word: &[char]) -> impl Iterator<Item = String> {
@@ -34,7 +28,7 @@ pub fn tier1_variations(word: &[char]) -> impl Iterator<Item = String> {
     // variations that have one of the chars deleted
     let deletes = (0..word.len()).map(|delete_at|{
         let slice = [ &word[..delete_at], &word[delete_at + 1..] ];
-        slice.iter().flat_map(move |slice| slice.into_iter()).collect()
+        slice.iter().flat_map(|slice| slice.into_iter()).collect()
     });
 
     // variations that have two neighbouring chars swapped
@@ -45,14 +39,14 @@ pub fn tier1_variations(word: &[char]) -> impl Iterator<Item = String> {
             &word[left_idx + 2..]
         ];
 
-        slice.iter().flat_map(move |slice| slice.into_iter()).collect()
+        slice.iter().flat_map(|slice| slice.into_iter()).collect()
     });
 
     // variations that have char replaced
     let replaces = (0..word.len()).flat_map(|insert_at|{
         CHARS.chars().map(move |insert_letter|{
             let slice = [ &word[..insert_at], &[insert_letter], &word[insert_at + 1..] ];
-            slice.iter().flat_map(move |slice| slice.into_iter()).collect()
+            slice.iter().flat_map(|slice| slice.into_iter()).collect()
         })
     });
 
@@ -60,10 +54,11 @@ pub fn tier1_variations(word: &[char]) -> impl Iterator<Item = String> {
     let inserts = (0..=word.len()).flat_map(|insert_at|{
         CHARS.chars().map(move |insert_letter|{
             let slice = [ &word[..insert_at], &[insert_letter], &word[insert_at..] ];
-            slice.iter().flat_map(move |slice| slice.into_iter()).collect()
+            slice.iter().flat_map(|slice| slice.into_iter()).collect()
         })
     });
 
     deletes.chain(swaps).chain(replaces).chain(inserts)
+        .collect::<Vec<String>>().into_iter()
     // concat_iter!(deletes, swaps, replaces, inserts)
-}*/
+}

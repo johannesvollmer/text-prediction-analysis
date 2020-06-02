@@ -14,14 +14,12 @@ use rayon::prelude::IntoParallelIterator;
 
 pub fn ngram_predictor(sentences: impl Iterator<Item = String>) -> impl (Fn(&[String]) -> Vec<String>) {
 
-
-
     use string_interner::StringInterner;
     use string_interner::Sym as StringId;
 
     type Count<T> = HashMap<T, usize>;
     type Chain<T> = HashMap<Vec<T>, Count<T>>;
-    let max_chain_len = 1;
+    let max_chain_len = 2;
 
     let mut strings: StringInterner<StringId> = string_interner::StringInterner::with_capacity(2048);
 
@@ -100,11 +98,11 @@ pub fn ngram_predictor(sentences: impl Iterator<Item = String>) -> impl (Fn(&[St
 
     println!("condensed to {} prediction entries", chains.len());
 
-    move |words: &[String]| -> Vec<String> {
-        if words.is_empty() { return starters.clone(); }
+    move |previous_words: &[String]| -> Vec<String> {
+        if previous_words.is_empty() { return starters.clone(); }
 
-        (1 ..= max_chain_len.min(words.len())).rev().flat_map(|chain_len| {
-            let sub_key_words = &words[words.len() - chain_len .. ];
+        (1 ..= max_chain_len.min(previous_words.len())).rev().flat_map(|chain_len| {
+            let sub_key_words = &previous_words[previous_words.len() - chain_len .. ];
             println!("sub key: {:?}", sub_key_words);
 
             let key_words: Vec<StringId> = sub_key_words.iter()
@@ -112,8 +110,11 @@ pub fn ngram_predictor(sentences: impl Iterator<Item = String>) -> impl (Fn(&[St
                 .collect();
 
             let options = chains.get(&key_words);
-            options.into_iter().flatten().map(|&id| strings.resolve(id).unwrap().to_owned())
-        }).collect()
+            options.into_iter().flatten()
+                .filter(|&id| !words[..top_word_count].contains(id))
+                .map(|&id| strings.resolve(id).unwrap().to_owned())
+
+        }).take(7).collect()
     }
 }
 

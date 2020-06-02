@@ -3,6 +3,7 @@
 pub fn build(words: impl Iterator<Item = String>)
     -> impl (Fn(&str) -> Vec<String>)
 {
+
     pub use patricia_tree::PatriciaSet;
     use patricia_tree::PatriciaMap;
 
