@@ -7,26 +7,135 @@
 //
 
 
-use rust_bert::pipelines::generation::{GPT2Generator, LanguageGenerator, GenerateConfig};
-use rust_bert::gpt2::*;
-use rust_bert::resources::{Resource, RemoteResource};
 use crate::corpus::split_to_words;
+use std::collections::{HashMap, BTreeMap};
+use rayon::prelude::IntoParallelIterator;
 
-pub fn predictor() -> impl (Fn(&str) -> Vec<String>) {
-    let max_word_count = 3;
+
+pub fn ngram_predictor(sentences: impl Iterator<Item = String>) -> impl (Fn(&[String]) -> Vec<String>) {
+
+
+
+    use string_interner::StringInterner;
+    use string_interner::Sym as StringId;
+
+    type Count<T> = HashMap<T, usize>;
+    type Chain<T> = HashMap<Vec<T>, Count<T>>;
+    let max_chain_len = 1;
+
+    let mut strings: StringInterner<StringId> = string_interner::StringInterner::with_capacity(2048);
+
+    // initialize the statistical data which we are going fill by analyzing the corpus
+    let mut word_chains: Chain<StringId> = Chain::with_capacity(1024*1024);
+    let mut all_chars: Count<char> = HashMap::new();
+    let mut sentence_starters : Count<StringId> = HashMap::new();
+    let mut all_words : Count<StringId> = HashMap::new();
+    let mut word_count: u128 = 0;
+    let mut char_count: u128 = 0;
+
+    for string in sentences {
+        let sentence = split_to_words(&string);
+        if sentence.is_empty() { continue; }
+
+        let words: Vec<StringId> = sentence.iter().map(|string| strings.get_or_intern(string)).collect();
+
+        for &word in &words {
+            *all_words.entry(word).or_insert(0) += 1;
+        }
+
+        *sentence_starters.entry(*words.first().unwrap()).or_insert(0) += 1;
+
+        word_count += sentence.len() as u128;
+
+        for char in string.chars() {
+            *all_chars.entry(char).or_insert(0) += 1;
+            char_count += 1;
+        }
+
+        for chain_len in 1 ..= max_chain_len {
+            for key in words.windows(chain_len + 1) {
+                let value = &key[chain_len];
+                let key = Vec::from(&key[ .. chain_len]);
+
+                let map = word_chains.entry(key).or_insert_with(HashMap::new);
+                *map.entry(*value).or_insert(0) += 1;
+            }
+        }
+    }
+
+    println!("analyzed all files");
+    println!("processed {} words", word_count);
+    println!("processed {} chars", char_count);
+    println!("collected {} distinct words", strings.len());
+    println!("collected {} prediction entries", word_chains.len());
+
+
+    fn map_to_sorted_count_vec<T>(map: impl Iterator<Item = (T, usize)>) -> Vec<(usize, T)> {
+        let tree: BTreeMap<usize, T> = map.map(|(value, count)| (count, value)).collect();
+        tree.into_iter().rev().collect()
+    }
+
+    fn map_to_sorted_vec<T>(map: Count<T>) -> Vec<T> {
+        let tree: BTreeMap<usize, T> = map.into_iter()
+            .map(|(value, count)| (count, value)).collect();
+
+        tree.into_iter().map(|(_, value)| value).rev().collect()
+    }
+
+    let words = map_to_sorted_vec(all_words);
+    let top_word_count = 7;
+
+    println!("top {} common words: {:?}", top_word_count, words[..top_word_count].iter().map(|&id| strings.resolve(id).unwrap()).collect::<Vec<_>>());
+
+    let starters = map_to_sorted_vec(sentence_starters);
+    let starters: Vec<String> = starters.into_iter()
+        .filter(|starter| !words[..top_word_count].contains(starter))
+        .map(|id| strings.resolve(id).unwrap().to_string())
+        .collect();
+
+    let chains: HashMap<Vec<StringId>, Vec<StringId>> = word_chains
+        .into_iter().filter(|(key, values)| !values.is_empty() && (key.len() == 1 || values.len() > 1))
+        .map(|(words, successors)| (words, map_to_sorted_vec(successors)))
+        .collect();
+
+    println!("condensed to {} prediction entries", chains.len());
+
+    move |words: &[String]| -> Vec<String> {
+        if words.is_empty() { return starters.clone(); }
+
+        (1 ..= max_chain_len.min(words.len())).rev().flat_map(|chain_len| {
+            let sub_key_words = &words[words.len() - chain_len .. ];
+            println!("sub key: {:?}", sub_key_words);
+
+            let key_words: Vec<StringId> = sub_key_words.iter()
+                .flat_map(|string| strings.get(string))
+                .collect();
+
+            let options = chains.get(&key_words);
+            options.into_iter().flatten().map(|&id| strings.resolve(id).unwrap().to_owned())
+        }).collect()
+    }
+}
+
+pub fn _gpt2_predictor() -> impl (Fn(&str) -> Vec<(Option<String>, Vec<String>)>) {
+    use rust_bert::pipelines::generation::{GPT2Generator, LanguageGenerator, GenerateConfig};
+    use rust_bert::gpt2::*;
+    use rust_bert::resources::{Resource, RemoteResource};
+
+    let max_base_word_count = 4;
 
     // create the GPT-2 Model that generates our variations
     let model = GPT2Generator::new(GenerateConfig {
 
         // vary length from 2 to 10 to keep it short
         min_length: 1,
-        max_length: max_word_count as u64 + 1, // cannot be 1 because it includes our prefix
+        max_length: max_base_word_count as u64 + 2, // cannot be 1 because it includes our prefix
 
         // always compute four variations at once
         num_return_sequences: 4,
 
-        do_sample: false, // no random funny business
-        temperature: 1.5,
+        do_sample: true, // no random funny business
+        temperature: 2.5,
         // num_beams: 4,
 
         model_resource: Resource::Remote(RemoteResource::from_pretrained(Gpt2ModelResources::GPT2_MEDIUM)),
@@ -44,16 +153,25 @@ pub fn predictor() -> impl (Fn(&str) -> Vec<String>) {
     move |base| {
         // generate a few predictions at once, using the GTP-2 generator
         println!("generating gpt-2 variations for \"{}\"", base);
-        debug_assert!(split_to_words(base).len() <= max_word_count);
+        debug_assert!(split_to_words(base).len() <= max_base_word_count);
 
         model.lock().unwrap()
-            .generate(Some(vec![base]), None).into_iter()
-            .filter_map(|prediction|{
+            .generate(if !base.trim().is_empty() { Some(vec![base]) } else { None }, None).into_iter()
+            .map(|prediction|{
+                println!("gpt output: {}", prediction.trim_end());
+
                 // remove the first few words which we gave the predictor
                 let predictions = &prediction[base.len() ..];
+                let mut words = split_to_words(predictions);
 
-                let words = split_to_words(predictions);
-                words.first().map(ToOwned::to_owned)
+                if !predictions.starts_with(char::is_whitespace) {
+                    let completion = words.remove(0);
+                    (Some(completion), words)
+                }
+                else {
+                    (None, words)
+                }
+
             }).collect()
     }
 }

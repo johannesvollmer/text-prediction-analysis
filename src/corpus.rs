@@ -6,6 +6,7 @@ use std::fs::File;
 pub fn sentences() -> impl Iterator<Item = String> {
     let directory = "corpora/norvig-com-big.txt"; // TODO
     // let directory = "corpora";
+    // let directory = "corpora/oanc";
 
     let files = walkdir::WalkDir::new(directory)
         .into_iter().filter_entry(|entry| !entry.path().file_name().unwrap().to_str().unwrap().starts_with("_"))
@@ -29,6 +30,7 @@ pub fn sentences() -> impl Iterator<Item = String> {
                 }
             }
 
+            // do not return incomplete sentences at file end
             return None;
         })
     });

@@ -33,7 +33,7 @@ pub fn run(compute_suggestions: impl Fn(Request) -> Response) {
         let answer = compute_suggestions(request);
 
         let duration = (time::now() - start_time).as_secs_f32();
-        println!("computed answer in {}s: {:#?}", duration, answer);
+        println!("computed answer in {}s: {:?}", duration, answer);
 
         Ok(serde_json::to_string(&answer)?)
     };

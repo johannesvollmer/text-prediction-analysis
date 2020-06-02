@@ -11,28 +11,59 @@ mod server;
 mod prediction;
 
 use crate::corpus::split_to_words;
-use crate::server::Response;
+use crate::server::{Response, Request};
+use std::io::Write;
+
 
 fn main() {
+    let respond = responder();
+
+    let _ = respond(Request {
+        previous: "hi wo".to_string(),
+        next: "".to_string()
+    });
+
+    // start a server that returns suggestions
+    // server::run(respond());
+}
+
+fn responder() -> impl Fn(Request) -> Response {
     print!("preparing data bases...");
+    std::io::stdout().flush().unwrap();
 
-    // analyze the text corpora
+
     let complete = completion::build(corpus::words());
-
-    let predict = prediction::predictor();
+    let predict = prediction::ngram_predictor(corpus::sentences());
 
     println!("... done.");
 
-    // serve the computed completitions
-    server::run(move |request| {
-        let previous_words = split_to_words(&request.previous);
+    let respond = move |request: Request|{
+        let mut previous_words = split_to_words(&request.previous);
+        println!("requesting suggestions for word: {:?}", previous_words);
 
-        let completions: Vec<String> = complete(&previous_words.last().unwrap()).into_iter()
-            .filter(|(_, count)| *count > 2)
-            .map(|(word, _)| word).collect();
+        let mut predicted_completions: Vec<String> = predict(&previous_words[ .. previous_words.len() - 1 ]);
+        println!("unfiltered predicted based on all but the last word: {:?}", predicted_completions);
 
-        let predictions: Vec<String> = predict(&request.previous);
+        predicted_completions.retain(|word| word.starts_with(previous_words.last().unwrap()));
+        println!("filtered predicted based on all but the last word: {:?}", predicted_completions);
 
-        Response { completions, predictions }
-    });
+        let char_completions: Vec<String> = complete(&previous_words.last().unwrap_or(&String::new()));
+        println!("char completions: {:?}", char_completions);
+        // char_completions.retain(|complete| predicted_completions.contains(complete));
+
+        let mut completions = predicted_completions;
+        completions.extend_from_slice(&char_completions);
+        println!("all completions: {:?}", completions);
+
+        let mut predicted_previous = previous_words.clone();
+        predicted_previous.remove(0);
+        predicted_previous.push(char_completions[0].clone()); // TODO predict for multiple top candidates!
+        let predictions: Vec<String> = predict(&predicted_previous);
+        println!("char-completed predictions: {:?}", predictions);
+
+        let response = Response { completions: completions, predictions: predictions };
+        response
+    };
+
+    respond
 }
