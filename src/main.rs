@@ -30,14 +30,12 @@ fn main() {
 }
 
 fn responder() -> impl Fn(Request) -> Response {
-    print!("preparing data bases...");
-    std::io::stdout().flush().unwrap();
+    println!("preparing data bases...");
 
+    let complete = completion::build();
+    let predict = prediction::ngram_predictor();
 
-    let complete = completion::build(corpus::words());
-    let predict = prediction::ngram_predictor(corpus::sentences());
-
-    println!("... done.");
+    println!("... prepared databases");
 
     let respond = move |request: Request|{
         let mut previous_words = split_to_words(&request.previous);

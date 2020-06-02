@@ -10,98 +10,120 @@
 use crate::corpus::split_to_words;
 use std::collections::{HashMap, BTreeMap};
 use rayon::prelude::IntoParallelIterator;
+use std::path::Path;
+use std::fs::File;
+use crate::corpus;
 
+const MAX_CHAIN_LEN: usize = 2;
 
-pub fn ngram_predictor(sentences: impl Iterator<Item = String>) -> impl (Fn(&[String]) -> Vec<String>) {
+pub fn ngram_predictor() -> impl (Fn(&[String]) -> Vec<String>) {
+    let path = Path::new(".prediction-cache");
+    type StringId = usize;
 
-    use string_interner::StringInterner;
-    use string_interner::Sym as StringId;
+    let (starters, strings, chains, top_words) = {
+        println!("attempting to load prediction cache...");
+        let cache_result = File::open(path).ok().and_then(|file| bincode::deserialize_from(file).ok());
 
-    type Count<T> = HashMap<T, usize>;
-    type Chain<T> = HashMap<Vec<T>, Count<T>>;
-    let max_chain_len = 2;
-
-    let mut strings: StringInterner<StringId> = string_interner::StringInterner::with_capacity(2048);
-
-    // initialize the statistical data which we are going fill by analyzing the corpus
-    let mut word_chains: Chain<StringId> = Chain::with_capacity(1024*1024);
-    let mut all_chars: Count<char> = HashMap::new();
-    let mut sentence_starters : Count<StringId> = HashMap::new();
-    let mut all_words : Count<StringId> = HashMap::new();
-    let mut word_count: u128 = 0;
-    let mut char_count: u128 = 0;
-
-    for string in sentences {
-        let sentence = split_to_words(&string);
-        if sentence.is_empty() { continue; }
-
-        let words: Vec<StringId> = sentence.iter().map(|string| strings.get_or_intern(string)).collect();
-
-        for &word in &words {
-            *all_words.entry(word).or_insert(0) += 1;
+        if let Some(result) = cache_result {
+            println!("... loaded cache");
+            result
         }
+        else {
+            println!("... invalid, computing new prediction cache");
+            type Count<T> = HashMap<T, usize>;
+            type Chain<T> = HashMap<Vec<T>, Count<T>>;
+            use string_interner::StringInterner;
 
-        *sentence_starters.entry(*words.first().unwrap()).or_insert(0) += 1;
+            let mut strings: StringInterner<StringId> = string_interner::StringInterner::with_capacity(2048);
 
-        word_count += sentence.len() as u128;
+            // initialize the statistical data which we are going fill by analyzing the corpus
+            let mut word_chains: Chain<StringId> = Chain::with_capacity(1024*1024);
+            let mut all_chars: Count<char> = HashMap::new();
+            let mut sentence_starters : Count<StringId> = HashMap::new();
+            let mut all_words : Count<StringId> = HashMap::new();
+            let mut word_count: u128 = 0;
+            let mut char_count: u128 = 0;
 
-        for char in string.chars() {
-            *all_chars.entry(char).or_insert(0) += 1;
-            char_count += 1;
-        }
+            for string in corpus::sentences() {
+                let sentence = split_to_words(&string);
+                if sentence.is_empty() { continue; }
 
-        for chain_len in 1 ..= max_chain_len {
-            for key in words.windows(chain_len + 1) {
-                let value = &key[chain_len];
-                let key = Vec::from(&key[ .. chain_len]);
+                let words: Vec<StringId> = sentence.iter().map(|string| strings.get_or_intern(string)).collect();
 
-                let map = word_chains.entry(key).or_insert_with(HashMap::new);
-                *map.entry(*value).or_insert(0) += 1;
+                for &word in &words {
+                    *all_words.entry(word).or_insert(0) += 1;
+                }
+
+                *sentence_starters.entry(*words.first().unwrap()).or_insert(0) += 1;
+
+                word_count += sentence.len() as u128;
+
+                for char in string.chars() {
+                    *all_chars.entry(char).or_insert(0) += 1;
+                    char_count += 1;
+                }
+
+                for chain_len in 1 ..=MAX_CHAIN_LEN {
+                    for key in words.windows(chain_len + 1) {
+                        let value = &key[chain_len];
+                        let key = Vec::from(&key[ .. chain_len]);
+
+                        let map = word_chains.entry(key).or_insert_with(HashMap::new);
+                        *map.entry(*value).or_insert(0) += 1;
+                    }
+                }
             }
+
+            println!("analyzed all files");
+            println!("processed {} words", word_count);
+            println!("processed {} chars", char_count);
+            println!("collected {} distinct words", strings.len());
+            println!("collected {} prediction entries", word_chains.len());
+
+
+            fn map_to_sorted_count_vec<T>(map: impl Iterator<Item = (T, usize)>) -> Vec<(usize, T)> {
+                let tree: BTreeMap<usize, T> = map.map(|(value, count)| (count, value)).collect();
+                tree.into_iter().rev().collect()
+            }
+
+            fn map_to_sorted_vec<T>(map: Count<T>) -> Vec<T> {
+                let tree: BTreeMap<usize, T> = map.into_iter()
+                    .map(|(value, count)| (count, value)).collect();
+
+                tree.into_iter().map(|(_, value)| value).rev().collect()
+            }
+
+            let words = map_to_sorted_vec(all_words);
+            let top_word_count = 7;
+
+            println!("top {} common words: {:?}", top_word_count, words[..top_word_count].iter().map(|&id| strings.resolve(id).unwrap()).collect::<Vec<_>>());
+
+            let starters = map_to_sorted_vec(sentence_starters);
+            let starters: Vec<String> = starters.into_iter()
+                .filter(|starter| !words[..top_word_count].contains(starter))
+                .map(|id| strings.resolve(id).unwrap().to_string())
+                .collect();
+
+            let chains: HashMap<Vec<StringId>, Vec<StringId>> = word_chains
+                .into_iter().filter(|(key, values)| !values.is_empty() && (key.len() == 1 || values.len() > 1))
+                .map(|(words, successors)| (words, map_to_sorted_vec(successors)))
+                .collect();
+
+            println!("condensed to {} prediction entries", chains.len());
+
+            let top_words = words[.. top_word_count].to_vec();
+
+
+            let result = (starters, strings, chains, top_words);
+            bincode::serialize_into(File::create(path).unwrap(), &result).unwrap();
+            result
         }
-    }
-
-    println!("analyzed all files");
-    println!("processed {} words", word_count);
-    println!("processed {} chars", char_count);
-    println!("collected {} distinct words", strings.len());
-    println!("collected {} prediction entries", word_chains.len());
-
-
-    fn map_to_sorted_count_vec<T>(map: impl Iterator<Item = (T, usize)>) -> Vec<(usize, T)> {
-        let tree: BTreeMap<usize, T> = map.map(|(value, count)| (count, value)).collect();
-        tree.into_iter().rev().collect()
-    }
-
-    fn map_to_sorted_vec<T>(map: Count<T>) -> Vec<T> {
-        let tree: BTreeMap<usize, T> = map.into_iter()
-            .map(|(value, count)| (count, value)).collect();
-
-        tree.into_iter().map(|(_, value)| value).rev().collect()
-    }
-
-    let words = map_to_sorted_vec(all_words);
-    let top_word_count = 7;
-
-    println!("top {} common words: {:?}", top_word_count, words[..top_word_count].iter().map(|&id| strings.resolve(id).unwrap()).collect::<Vec<_>>());
-
-    let starters = map_to_sorted_vec(sentence_starters);
-    let starters: Vec<String> = starters.into_iter()
-        .filter(|starter| !words[..top_word_count].contains(starter))
-        .map(|id| strings.resolve(id).unwrap().to_string())
-        .collect();
-
-    let chains: HashMap<Vec<StringId>, Vec<StringId>> = word_chains
-        .into_iter().filter(|(key, values)| !values.is_empty() && (key.len() == 1 || values.len() > 1))
-        .map(|(words, successors)| (words, map_to_sorted_vec(successors)))
-        .collect();
-
-    println!("condensed to {} prediction entries", chains.len());
+    };
 
     move |previous_words: &[String]| -> Vec<String> {
         if previous_words.is_empty() { return starters.clone(); }
 
-        (1 ..= max_chain_len.min(previous_words.len())).rev().flat_map(|chain_len| {
+        (1 ..= MAX_CHAIN_LEN.min(previous_words.len())).rev().flat_map(|chain_len| {
             let sub_key_words = &previous_words[previous_words.len() - chain_len .. ];
             println!("sub key: {:?}", sub_key_words);
 
@@ -111,7 +133,7 @@ pub fn ngram_predictor(sentences: impl Iterator<Item = String>) -> impl (Fn(&[St
 
             let options = chains.get(&key_words);
             options.into_iter().flatten()
-                .filter(|&id| !words[..top_word_count].contains(id))
+                .filter(|&id| !top_words.contains(id))
                 .map(|&id| strings.resolve(id).unwrap().to_owned())
 
         }).take(7).collect()
