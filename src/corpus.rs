@@ -4,7 +4,7 @@ use std::io::{BufReader, BufRead};
 use std::fs::File;
 
 pub fn sentences() -> impl Iterator<Item = String> {
-    let directory = "corpora/norvig-com-big.txt";
+    let directory = "corpora/norvig-com-big.txt"; // TODO
     // let directory = "corpora";
 
     let files = walkdir::WalkDir::new(directory)

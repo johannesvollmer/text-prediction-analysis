@@ -6,6 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::time::Instant as time;
+use std::io::{Read};
+use tiny_http::{StatusCode};
+
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Request {
@@ -16,16 +19,13 @@ pub struct Request {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Response {
     pub completions: Vec<String>,
+    pub predictions: Vec<String>,
 }
 
 /// Start a server that answers JSON suggestion requests with JSON suggestions.
-pub fn run <F: (Fn(Request) -> Response)> (compute_suggestions: F)
-    where F: Sync + Send + 'static
-{
-    println!("starting the suggestion server on localhost:3000");
-
-    rouille::start_server_with_pool("localhost:3000", Some(1), move |request| {
-        let request: Request = serde_json::from_reader(request.data().unwrap()).unwrap();
+pub fn run(compute_suggestions: impl Fn(Request) -> Response) {
+    let compute_answer = move |request: &mut dyn Read| -> std::io::Result<String> {
+        let request: Request = serde_json::from_reader(request)?;
 
         println!("received a prediction request: {:?}", request);
         let start_time = time::now();
@@ -34,6 +34,25 @@ pub fn run <F: (Fn(Request) -> Response)> (compute_suggestions: F)
 
         let duration = (time::now() - start_time).as_secs_f32();
         println!("computed answer in {}s: {:#?}", duration, answer);
-        rouille::Response::json(&answer)
-    });
+
+        Ok(serde_json::to_string(&answer)?)
+    };
+
+    let server = tiny_http::Server::http("localhost:3000").unwrap();
+
+    loop {
+        let result = server.recv().map(|mut request| {
+            match compute_answer(request.as_reader()) {
+                Ok(answer) => request.respond(tiny_http::Response::from_data(answer.as_bytes().to_vec())),
+                Err(error) => {
+                    eprintln!("Error: {:?}", error);
+                    request.respond(tiny_http::Response::empty(StatusCode(500)))
+                },
+            }
+        });
+
+        if let Err(error) = result {
+            eprintln!("Error: {:?}", error);
+        }
+    }
 }

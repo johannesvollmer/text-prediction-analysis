@@ -5,6 +5,58 @@
 // // http://norvig.com/spell-correct.html -> http://norvig.com/big.txt
 //
 //
+
+
+use rust_bert::pipelines::generation::{GPT2Generator, LanguageGenerator, GenerateConfig};
+use rust_bert::gpt2::*;
+use rust_bert::resources::{Resource, RemoteResource};
+use crate::corpus::split_to_words;
+
+pub fn predictor() -> impl (Fn(&str) -> Vec<String>) {
+
+    // create the GPT-2 Model that generates our variations
+    let model = GPT2Generator::new(GenerateConfig {
+
+        // vary length from 2 to 10 to keep it short
+        min_length: 1,
+        max_length: 4, // cannot be 1 because it includes our prefix
+
+        // length_penalty: 1000.0,
+
+        // always compute four variations at once
+        num_return_sequences: 4,
+
+        do_sample: false, // no random funny business
+        temperature: 1.5,
+
+        model_resource: Resource::Remote(RemoteResource::from_pretrained(Gpt2ModelResources::GPT2_MEDIUM)),
+        merges_resource: Resource::Remote(RemoteResource::from_pretrained(Gpt2MergesResources::GPT2_MEDIUM)),
+        vocab_resource: Resource::Remote(RemoteResource::from_pretrained(Gpt2VocabResources::GPT2_MEDIUM)),
+        config_resource: Resource::Remote(RemoteResource::from_pretrained(Gpt2ConfigResources::GPT2_MEDIUM)),
+
+        // device: Device::Cuda(0), // TODO
+
+        ..Default::default()
+    }).unwrap();
+
+    let model = std::sync::Arc::new(std::sync::Mutex::new(model));
+
+    move |base| {
+        // generate a few predictions at once, using the GTP-2 generator
+        println!("generating gpt-2 variations for \"{}\"", base);
+        model.lock().unwrap()
+            .generate(Some(vec![base]), None).into_iter()
+            .filter_map(|prediction|{
+                // remove the first few words which we gave the predictor
+                let predictions = &prediction[base.len() ..];
+
+                let words = split_to_words(predictions);
+                words.first().map(ToOwned::to_owned)
+            }).collect()
+    }
+}
+
+
 // use std::collections::{HashMap, BTreeMap, HashSet};
 //
 // use string_interner::StringInterner;
