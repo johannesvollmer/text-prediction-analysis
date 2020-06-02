@@ -13,21 +13,21 @@ use rust_bert::resources::{Resource, RemoteResource};
 use crate::corpus::split_to_words;
 
 pub fn predictor() -> impl (Fn(&str) -> Vec<String>) {
+    let max_word_count = 3;
 
     // create the GPT-2 Model that generates our variations
     let model = GPT2Generator::new(GenerateConfig {
 
         // vary length from 2 to 10 to keep it short
         min_length: 1,
-        max_length: 4, // cannot be 1 because it includes our prefix
-
-        // length_penalty: 1000.0,
+        max_length: max_word_count as u64 + 1, // cannot be 1 because it includes our prefix
 
         // always compute four variations at once
         num_return_sequences: 4,
 
         do_sample: false, // no random funny business
         temperature: 1.5,
+        // num_beams: 4,
 
         model_resource: Resource::Remote(RemoteResource::from_pretrained(Gpt2ModelResources::GPT2_MEDIUM)),
         merges_resource: Resource::Remote(RemoteResource::from_pretrained(Gpt2MergesResources::GPT2_MEDIUM)),
@@ -44,6 +44,8 @@ pub fn predictor() -> impl (Fn(&str) -> Vec<String>) {
     move |base| {
         // generate a few predictions at once, using the GTP-2 generator
         println!("generating gpt-2 variations for \"{}\"", base);
+        debug_assert!(split_to_words(base).len() <= max_word_count);
+
         model.lock().unwrap()
             .generate(Some(vec![base]), None).into_iter()
             .filter_map(|prediction|{

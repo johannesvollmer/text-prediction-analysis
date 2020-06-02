@@ -39,6 +39,7 @@ pub fn run(compute_suggestions: impl Fn(Request) -> Response) {
     };
 
     let server = tiny_http::Server::http("localhost:3000").unwrap();
+    println!("starting server.");
 
     loop {
         let result = server.recv().map(|mut request| {

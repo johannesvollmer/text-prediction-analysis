@@ -14,14 +14,14 @@ use crate::corpus::split_to_words;
 use crate::server::Response;
 
 fn main() {
-    println!("analyzing text...");
+    print!("preparing data bases...");
 
     // analyze the text corpora
     let complete = completion::build(corpus::words());
 
     let predict = prediction::predictor();
 
-    println!("analysis finished");
+    println!("... done.");
 
     // serve the computed completitions
     server::run(move |request| {
